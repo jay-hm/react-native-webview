@@ -2,7 +2,9 @@ package com.reactnativecommunity.webview;
 
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
+import android.app.Activity;
 import android.app.DownloadManager;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -31,6 +33,7 @@ import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -66,8 +69,10 @@ import com.reactnativecommunity.webview.events.TopShouldStartLoadWithRequestEven
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.util.ArrayList;
@@ -112,6 +117,9 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   public static final int COMMAND_INJECT_JAVASCRIPT = 6;
   public static final int COMMAND_LOAD_URL = 7;
   public static final int COMMAND_FOCUS = 8;
+  public static final String INTENT_URI_START = "intent:";
+  public static final String INTENT_FALLBACK_URL = "browser_fallback_url";
+  public static final String URI_SCHEME_MARKET = "market://details?id=";
   protected static final String REACT_CLASS = "RNCWebView";
   protected static final String HTML_ENCODING = "UTF-8";
   protected static final String HTML_MIME_TYPE = "text/html";
@@ -354,6 +362,11 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     view.getSettings().setSaveFormData(!disable);
   }
 
+  @ReactProp(name = "envJavaScript")
+  public void setEnvJavaScript(WebView view, @Nullable String envJavaScript) {
+    ((RNCWebView) view).setEnvJavaScript(envJavaScript);
+  }
+
   @ReactProp(name = "injectedJavaScript")
   public void setInjectedJavaScript(WebView view, @Nullable String injectedJavaScript) {
     ((RNCWebView) view).setInjectedJavaScript(injectedJavaScript);
@@ -363,7 +376,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   public void setMessagingEnabled(WebView view, boolean enabled) {
     ((RNCWebView) view).setMessagingEnabled(enabled);
   }
-   
+
   @ReactProp(name = "incognito")
   public void setIncognito(WebView view, boolean enabled) {
     // Remove all previous cookies
@@ -685,7 +698,27 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     }
 
     @Override
+    public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+      if (url.contains("/env")) {
+        return getEnvWebResourceResponseFromView(view);
+      } else {
+        return super.shouldInterceptRequest(view, url);
+      }
+    }
+
+    @Override
     public boolean shouldOverrideUrlLoading(WebView view, String url) {
+      if (url.toLowerCase().startsWith(INTENT_URI_START)) {
+        Intent parsedIntent = null;
+        try {
+          parsedIntent = Intent.parseUri(url, 0);
+          view.getContext().startActivity(parsedIntent);
+        } catch(ActivityNotFoundException | URISyntaxException e) {
+          return doFallback(view, parsedIntent);
+        }
+        return true;
+      }
+
       dispatchEvent(
         view,
         new TopShouldStartLoadWithRequestEvent(
@@ -693,7 +726,6 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
           createWebViewEvent(view, url)));
       return true;
     }
-
 
     @TargetApi(Build.VERSION_CODES.N)
     @Override
@@ -747,6 +779,44 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
     public void setUrlPrefixesForDefaultIntent(ReadableArray specialUrls) {
       mUrlPrefixesForDefaultIntent = specialUrls;
+    }
+
+    public boolean doFallback(WebView view, Intent parsedIntent) {
+      if (parsedIntent == null) {
+        return false;
+      }
+
+      String fallbackUrl = parsedIntent.getStringExtra(INTENT_FALLBACK_URL);
+      if (fallbackUrl != null) {
+        view.loadUrl(fallbackUrl);
+        return true;
+      }
+
+      String packageName = parsedIntent.getPackage();
+      if (packageName != null) {
+        view.getContext().startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(URI_SCHEME_MARKET + packageName)));
+        return true;
+      }
+      return false;
+    }
+
+    private static WebResourceResponse getEnvWebResourceResponseFromView(WebView view) {
+      @Nullable String envJS = ((RNCWebView) view).getEnvJavaScript();
+      if (envJS != null && !TextUtils.isEmpty(envJS)) {
+        ByteArrayInputStream bais = new ByteArrayInputStream(envJS.getBytes());
+        return getUtf8EncodedWebResourceResponse(bais);
+      } else {
+        return getEmptyWebResourceResponse();
+      }
+    }
+
+    private static WebResourceResponse getUtf8EncodedWebResourceResponse(ByteArrayInputStream data) {
+      return new WebResourceResponse("application/x-javascript", "UTF-8", data);
+    }
+
+    private static WebResourceResponse getEmptyWebResourceResponse() {
+      ByteArrayInputStream bais = new ByteArrayInputStream("".getBytes());
+      return new WebResourceResponse("text/plain", "UTF-8", bais);
     }
   }
 
@@ -884,6 +954,8 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
    */
   protected static class RNCWebView extends WebView implements LifecycleEventListener {
     protected @Nullable
+    String envJS;
+    protected @Nullable
     String injectedJS;
     protected boolean messagingEnabled = false;
     protected @Nullable
@@ -950,6 +1022,15 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     public @Nullable
     RNCWebViewClient getRNCWebViewClient() {
       return mRNCWebViewClient;
+    }
+
+    public void setEnvJavaScript(@Nullable String js) {
+      envJS = js;
+    }
+
+    public @Nullable
+    String getEnvJavaScript() {
+      return envJS;
     }
 
     public void setInjectedJavaScript(@Nullable String js) {
